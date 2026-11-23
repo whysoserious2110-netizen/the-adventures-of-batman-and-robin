@@ -1,6 +1,7 @@
 ; ============================================================
 ;  BATMAN.ASM  -  THE ADVENTURES OF BATMAN & ROBIN
 ;  PHASE 0 : Title screen + OPTION MODE + Batcave cutscene
+;  STEP 2  : scrolling street + Batman run (A/S or arrows, ESC)
 ;  TASM 5.1  |  VGA mode 13h (320x200, 256 colors)
 ;
 ;  Needs in the same folder:  ALFRED.INC  (assembled in)
@@ -160,7 +161,7 @@ palB label byte             ; colors 32..47
     INCLUDE JOKERTV.INC     ; palH (colors 112..127) + jokertv_img
     INCLUDE BATPORT.INC     ; palI (colors 128..143) + batman_img
     INCLUDE EQUIP.INC       ; palJ (colors 144..159) + equip_img
-    INCLUDE GAMESPR.INC     ; bat_spr, hud_spr (colors 64..255 from GAME.BIN)
+    INCLUDE STAGE.INC       ; sprite table + constants (colors 64..255 from STAGE.BIN)
 palbuf    db 256*3 dup(0)   ; working palette (colors 0..255)
 
 ; ---------------- strings ---------------------------------
@@ -174,9 +175,24 @@ fname   db "TITLE.BIN",0
 fname2  db "OPTION.BIN",0
 fname3  db "AMUSED.BIN",0
 msgfile db "TITLE.BIN, OPTION.BIN or AMUSED.BIN not found.$"
-fname4   db "GAME.BIN",0
-gamepal  db 576 dup(0)          ; palette of GAME.BIN (colors 64..255)
-bat_x    dw 0
+fname5   db "STAGE.BIN",0
+msgstage db "STAGE.BIN not found or not enough memory.$"
+gamepal  db 576 dup(0)          ; palette of STAGE.BIN (colors 64..255)
+stseg    dw 5 dup(0)            ; 5 street screens (64000 bytes each)
+atlseg   dw 0                   ; sprite atlas segment
+cam_x    dw 0                   ; camera (world x of the left screen edge)
+wx       dw 0                   ; Batman world x
+hp       dw 0                   ; health bar height
+anim_f   db 0
+anim_t   db 0
+moving   db 0
+k_left   db 0
+k_right  db 0
+k_a      db 0
+k_s      db 0
+k_esc    db 0
+old9_off dw 0
+old9_seg dw 0
 bat_dir  db 0                   ; 0 = facing right, 1 = facing left
 score    dw 0
 scorestr db "00000",0
@@ -475,66 +491,197 @@ no_mem:
     int 21h
 
 ; ============================================================
-;  STARTGAME - placeholder (gameplay will be built next)
+;  STARTGAME - Phase 1: scrolling street, Batman runs
+;  A / S or LEFT / RIGHT = move, ESC = leave the stage
+;  Needs STAGE.BIN + STAGE.INC (street 1600x200 + sprite atlas)
 ; ============================================================
-; ============================================================
-;  STARTGAME - Phase 1: street scene, walk with A/S or arrows
-; ============================================================
+SPEED     EQU 8                 ; pixels per frame (bigger = faster)
+WORLD_W   EQU 1600
+START_WX  EQU 70                ; Batman starts here (world x)
+CAM_LEAD  EQU 140               ; camera starts moving when Batman passes this screen x
+CAM_MAX   EQU WORLD_W-320
+MIN_SX    EQU 30                ; Batman cannot walk left of this screen x
+MAX_WX    EQU WORLD_W-30
+ANIM_RATE EQU 1                 ; frames per animation step (bigger = slower)
+
 StartGame proc near
-    mov dx,offset fname4        ; GAME.BIN -> buffer + gamepal
-    mov si,offset gamepal
-    mov ax,[bufseg]
-    call LoadBin
+    ; free the option background buffer to make room
+    mov ax,[bufseg2]
+    mov es,ax
+    mov ah,49h
+    int 21h
+    call LoadStage
+    jc sg_nofile
     call UseGamePal
     mov word ptr [drawseg],0A000h
-    mov ax,[bufseg]
-    call CopyBuf                ; clean street background
-    mov word ptr [bat_x],BAT_START_X
+    mov word ptr [cam_x],0
+    mov word ptr [wx],START_WX
     mov byte ptr [bat_dir],0
+    mov byte ptr [anim_f],0
+    mov byte ptr [anim_t],0
     mov word ptr [score],0
-    call DrawHud
-    call DrawBatman
+    mov word ptr [hp],TUBE_H
+    mov byte ptr [k_left],0
+    mov byte ptr [k_right],0
+    mov byte ptr [k_a],0
+    mov byte ptr [k_s],0
+    mov byte ptr [k_esc],0
+    call InstallKbd
+    call RenderGame
+    mov ax,[bufseg]
+    call CopyBuf
     call FadeIn
 sg_loop:
-    call WaitVsync
-    mov ah,1
-    int 16h
-    jz sg_loop
-    xor ah,ah
-    int 16h
-    cmp ah,1                    ; ESC
-    je sg_exit
-    cmp ah,4Bh                  ; LEFT
-    je sg_left
-    cmp ah,1Eh                  ; A = back
-    je sg_left
-    cmp ah,4Dh                  ; RIGHT
-    je sg_right
-    cmp ah,1Fh                  ; S = forward
-    je sg_right
-    jmp sg_loop
-sg_left:
-    call EraseBatman
-    mov byte ptr [bat_dir],1
-    cmp word ptr [bat_x],4
-    jbe sg_draw
-    sub word ptr [bat_x],4
-    jmp sg_draw
-sg_right:
-    call EraseBatman
+    cmp byte ptr [k_esc],0
+    jne sg_exit
+    mov byte ptr [moving],0
+    ; ---- right ----
+    mov al,[k_right]
+    or al,[k_s]
+    jz sg_chkl
     mov byte ptr [bat_dir],0
-    cmp word ptr [bat_x],320-BAT_W-4
-    jae sg_draw
-    add word ptr [bat_x],4
+    mov byte ptr [moving],1
+    mov ax,[wx]
+    add ax,SPEED
+    cmp ax,MAX_WX
+    jbe sg_rok
+    mov ax,MAX_WX
+sg_rok:
+    mov [wx],ax
+    jmp sg_cam
+    ; ---- left ----
+sg_chkl:
+    mov al,[k_left]
+    or al,[k_a]
+    jz sg_cam
+    mov byte ptr [bat_dir],1
+    mov byte ptr [moving],1
+    mov ax,[wx]
+    sub ax,SPEED
+    mov bx,MIN_SX               ; left limit = start of the street
+    cmp ax,bx
+    jge sg_lok
+    mov ax,bx
+sg_lok:
+    mov [wx],ax
+    ; ---- camera follows Batman both ways ----
+sg_cam:
+    mov ax,[wx]
+    sub ax,CAM_LEAD
+    jge sg_c1
+    xor ax,ax
+sg_c1:
+    cmp ax,CAM_MAX
+    jbe sg_cset
+    mov ax,CAM_MAX
+sg_cset:
+    mov [cam_x],ax
+sg_noscr:
+    ; ---- run animation ----
+    cmp byte ptr [moving],0
+    jne sg_anim
+    mov byte ptr [anim_f],0
+    mov byte ptr [anim_t],0
+    jmp sg_draw
+sg_anim:
+    inc byte ptr [anim_t]
+    cmp byte ptr [anim_t],ANIM_RATE
+    jb sg_draw
+    mov byte ptr [anim_t],0
+    inc byte ptr [anim_f]
+    cmp byte ptr [anim_f],NRUN
+    jb sg_draw
+    mov byte ptr [anim_f],0
 sg_draw:
-    call DrawBatman
+    call RenderGame
+    call WaitVsync
+    mov ax,[bufseg]
+    call CopyBuf
     jmp sg_loop
 sg_exit:
+    call RestoreKbd
     call FadeOut
     ret
+sg_nofile:
+    mov ax,3
+    int 10h
+    mov dx,offset msgstage
+    mov ah,9
+    int 21h
+    mov ax,4C01h
+    int 21h
 StartGame endp
 
-; ---- game colors (64..255) into the working palette ----
+; ---- allocate buffers and read STAGE.BIN (carry set = failed) ----
+; file: 576 palette bytes, 5 x 64000 street (5 screens side by side),
+;       then the 62400-byte sprite atlas (320 wide)
+LoadStage proc near
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    xor si,si
+ls_al:
+    mov bx,0FA0h                ; 64000 bytes
+    mov ah,48h
+    int 21h
+    jc ls_fail
+    mov [stseg+si],ax
+    add si,2
+    cmp si,10
+    jb ls_al
+    mov bx,3901                 ; atlas
+    mov ah,48h
+    int 21h
+    jc ls_fail
+    mov [atlseg],ax
+    mov dx,offset fname5
+    mov ax,3D00h
+    int 21h
+    jc ls_fail
+    mov bx,ax                   ; file handle
+    mov dx,offset gamepal
+    mov cx,576
+    mov ah,3Fh
+    int 21h
+    xor si,si
+ls_rd:
+    push ds
+    mov ax,[stseg+si]
+    mov ds,ax
+    xor dx,dx
+    mov cx,64000
+    mov ah,3Fh
+    int 21h
+    pop ds
+    add si,2
+    cmp si,10
+    jb ls_rd
+    push ds
+    mov ax,[atlseg]
+    mov ds,ax
+    xor dx,dx
+    mov cx,62400
+    mov ah,3Fh
+    int 21h
+    pop ds
+    mov ah,3Eh                  ; close
+    int 21h
+    clc
+    jmp ls_x
+ls_fail:
+    stc
+ls_x:
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+LoadStage endp
+
+; ---- stage colors (64..255) into the working palette ----
 UseGamePal proc near
     push ax
     push cx
@@ -556,147 +703,259 @@ UseGamePal proc near
     ret
 UseGamePal endp
 
-; ---- masked sprite: SI=bitmap AX=x BX=y CX=w DX=h (0 = transparent) ----
-DrawSprite proc near
-    pusha
+; ---- keyboard: our own INT 9 so held keys work ----
+InstallKbd proc near
+    push ax
+    push bx
+    push dx
+    push ds
     push es
-    mov [sp_w],cx
-    mov [sp_h],dx
-    mov di,bx
-    shl di,6
-    shl bx,8
-    add di,bx
-    add di,ax                   ; di = y*320 + x
-    mov ax,0A000h
-    mov es,ax
-    cld
-spr_row:
-    mov cx,[sp_w]
-    push di
-spr_px:
-    lodsb
-    or al,al
-    jz spr_skip
-    mov es:[di],al
-spr_skip:
-    inc di
-    loop spr_px
-    pop di
-    add di,320
-    dec word ptr [sp_h]
-    jnz spr_row
+    mov ax,3509h
+    int 21h
+    mov [old9_off],bx
+    mov [old9_seg],es
+    push cs
+    pop ds
+    mov dx,offset KbdISR
+    mov ax,2509h
+    int 21h
     pop es
+    pop ds
+    pop dx
+    pop bx
+    pop ax
+    ret
+InstallKbd endp
+
+RestoreKbd proc near
+    push ax
+    push dx
+    push ds
+    mov dx,[old9_off]
+    mov ax,[old9_seg]
+    mov ds,ax
+    mov ax,2509h
+    int 21h
+    pop ds
+    pop dx
+    pop ax
+    ret
+RestoreKbd endp
+
+KbdISR proc far
+    push ax
+    push bx
+    push ds
+    mov ax,@data
+    mov ds,ax
+    in al,60h
+    mov bl,al
+    and bl,7Fh                  ; scan code
+    mov ah,1                    ; 1 = key down
+    test al,80h
+    jz kb_set
+    xor ah,ah                   ; 0 = key released
+kb_set:
+    cmp bl,4Bh
+    jne kb_1
+    mov [k_left],ah
+kb_1:
+    cmp bl,4Dh
+    jne kb_2
+    mov [k_right],ah
+kb_2:
+    cmp bl,1Eh
+    jne kb_3
+    mov [k_a],ah
+kb_3:
+    cmp bl,1Fh
+    jne kb_4
+    mov [k_s],ah
+kb_4:
+    cmp bl,01h
+    jne kb_5
+    mov [k_esc],ah
+kb_5:
+    mov al,20h                  ; end of interrupt
+    out 20h,al
+    pop ds
+    pop bx
+    pop ax
+    iret
+KbdISR endp
+
+; ---- build one frame in the back buffer (bufseg) ----
+RenderGame proc near
+    pusha
+    call BuildStreet
+    mov ax,[bufseg]
+    mov [drawseg],ax            ; text / rectangles go to the back buffer
+    mov ax,[wx]
+    sub ax,[cam_x]              ; Batman's screen x
+    xor bx,bx                   ; idle
+    cmp byte ptr [moving],0
+    je rg_spr
+    mov bl,[anim_f]
+    inc bx                      ; run sprites start at index 1
+rg_spr:
+    mov dl,[bat_dir]
+    call DrawAtlasSpr
+    call DrawHud
+    mov word ptr [drawseg],0A000h
     popa
     ret
-DrawSprite endp
+RenderGame endp
 
-; ---- same, mirrored left/right ----
-DrawSpriteFlip proc near
-    pusha
-    push es
-    mov [sp_w],cx
-    mov [sp_h],dx
-    mov di,bx
-    shl di,6
-    shl bx,8
-    add di,bx
-    add di,ax
-    add di,cx
-    dec di                      ; start at the right end of the row
-    mov ax,0A000h
-    mov es,ax
-    cld
-spf_row:
-    mov cx,[sp_w]
-    push di
-spf_px:
-    lodsb
-    or al,al
-    jz spf_skip
-    mov es:[di],al
-spf_skip:
-    dec di
-    loop spf_px
-    pop di
-    add di,320
-    dec word ptr [sp_h]
-    jnz spf_row
-    pop es
-    popa
-    ret
-DrawSpriteFlip endp
-
-; ---- restore a rectangle from the background buffer: AX=x BX=y CX=w DX=h ----
-RestoreRect proc near
+; ---- copy the visible 320 columns of the street into the back buffer ----
+BuildStreet proc near
     pusha
     push ds
     push es
-    mov bp,cx                   ; bp = width
-    mov di,bx
-    shl di,6
-    shl bx,8
-    add di,bx
-    add di,ax
-    mov si,di
-    mov ax,0A000h
-    mov es,ax
-    mov ax,[bufseg]
-    mov ds,ax
     cld
-rr_row:
+    mov ax,[bufseg]
+    mov es,ax
+    mov ax,[cam_x]
+    xor dx,dx
+    mov cx,320
+    div cx                      ; ax = screen number, dx = offset inside it
+    shl ax,1
+    mov bx,ax
+    push word ptr [stseg+bx+2]  ; next screen (only used when dx <> 0)
+    mov ax,[stseg+bx]
+    mov ds,ax
+    mov bp,320
+    sub bp,dx                   ; bp = bytes taken from the first screen
+    mov si,dx
+    xor di,di
+    mov ax,200
+bs_a:
     mov cx,bp
-    push si
-    push di
     rep movsb
-    pop di
-    pop si
-    add si,320
-    add di,320
-    dec dx
-    jnz rr_row
+    add si,dx
+    add di,dx
+    dec ax
+    jnz bs_a
+    pop ax                      ; segment of the next screen
+    or dx,dx
+    jz bs_done
+    mov ds,ax
+    xor si,si
+    mov di,bp
+    mov ax,200
+bs_b:
+    mov cx,dx
+    rep movsb                   ; copy the left part of the next screen
+    add si,bp                   ; next source row
+    add di,bp                   ; next dest row, past the part already filled
+    dec ax
+    jnz bs_b
+bs_done:
     pop es
     pop ds
     popa
     ret
-RestoreRect endp
+BuildStreet endp
 
-DrawBatman proc near
+; ---- atlas sprite into the back buffer ----
+;      AX = anchor screen x, BX = sprite number, DL = 1 to mirror
+;      (transparent color 0, clipped left/right)
+DrawAtlasSpr proc near
     pusha
-    mov ax,[bat_x]
-    mov bx,BAT_Y
-    mov cx,BAT_W
-    mov dx,BAT_H
-    mov si,offset bat_spr
-    cmp byte ptr [bat_dir],0
-    jne bt_flip
-    call DrawSprite
-    jmp bt_x
-bt_flip:
-    call DrawSpriteFlip
-bt_x:
+    push ds
+    push es
+    cld
+    push ax                     ; anchor x
+    push dx                     ; flip flag in dl
+    mov ax,bx
+    mov cx,12                   ; 6 words per sprite
+    mul cx
+    mov bx,ax                   ; bx = table offset
+    pop dx
+    pop ax
+    mov cx,[spr_tab+bx+8]       ; anchor inside the sprite
+    or dl,dl
+    jz da_nf
+    mov cx,[spr_tab+bx+4]
+    dec cx
+    sub cx,[spr_tab+bx+8]       ; w-1-anchor when mirrored
+da_nf:
+    sub ax,cx                   ; ax = left edge on screen
+    mov bp,1
+    or dl,dl
+    jz da_s
+    mov bp,-1                   ; mirrored: write right to left
+    add ax,[spr_tab+bx+4]
+    dec ax
+da_s:                           ; ax = screen x of the first column drawn
+    mov dx,[spr_tab+bx+10]      ; screen y
+    mov di,dx
+    shl di,6
+    shl dx,8
+    add di,dx
+    add di,ax                   ; di = y*320 + x
+    mov dx,[spr_tab+bx+2]       ; atlas y
+    mov si,dx
+    shl si,6
+    shl dx,8
+    add si,dx
+    add si,[spr_tab+bx+0]       ; si = atlas y*320 + atlas x
+    mov dx,[spr_tab+bx+6]       ; rows
+    mov cx,[spr_tab+bx+4]       ; width (< 256)
+    mov bx,ax                   ; bx = current screen x
+    mov ah,cl                   ; ah = width
+    push ax
+    mov ax,[bufseg]
+    mov es,ax
+    mov ax,[atlseg]
+    mov ds,ax
+    pop ax
+da_row:
+    push di
+    push bx
+    mov cl,ah
+da_px:
+    lodsb
+    or al,al
+    jz da_skip
+    cmp bx,320
+    jae da_skip                 ; off screen (also catches negative x)
+    mov es:[di],al
+da_skip:
+    add di,bp
+    add bx,bp
+    dec cl
+    jnz da_px
+    pop bx
+    pop di
+    add di,320
+    mov cl,ah
+    sub si,cx                   ; back to the start of this atlas row
+    add si,320                  ; next atlas row
+    dec dx
+    jnz da_row
+    pop es
+    pop ds
     popa
     ret
-DrawBatman endp
+DrawAtlasSpr endp
 
-EraseBatman proc near
-    pusha
-    mov ax,[bat_x]
-    mov bx,BAT_Y
-    mov cx,BAT_W
-    mov dx,BAT_H
-    call RestoreRect
-    popa
-    ret
-EraseBatman endp
-
+; ---- HUD: BATMAN flag, orange health bar, 5-digit score ----
 DrawHud proc near
     pusha
     mov ax,HUD_X
-    mov bx,HUD_Y
-    mov cx,HUD_W
-    mov dx,HUD_H
-    mov si,offset hud_spr
-    call DrawSprite
+    mov bx,SPR_HUD
+    xor dl,dl
+    call DrawAtlasSpr
+    mov dx,[hp]                 ; health bar: fills from the bottom
+    or dx,dx
+    jz dh_noh
+    mov bx,TUBE_Y+TUBE_H
+    sub bx,dx
+    mov ax,TUBE_X
+    mov cx,TUBE_W
+    mov si,HEALTH_COL
+    call FillRect
+dh_noh:
     call DrawScore
     popa
     ret
