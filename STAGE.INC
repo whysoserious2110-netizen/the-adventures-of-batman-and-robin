@@ -25,9 +25,20 @@ SPR_RUN199 EQU 13
 SPR_RUN200 EQU 14
 SPR_HUD EQU 15
 NRUN EQU 14
+SPR_PUNCHW EQU 16
+SPR_PUNCH EQU 17
+SPR_JK1 EQU 18
+SPR_JK2 EQU 19
+SPR_JK3 EQU 20
+SPR_DK0 EQU 21            ; Batman death animation: sprites 21..27
+DK_N EQU 7
+SPR_KICK4 EQU 28          ; kick animation: JK1..JK3 + these two
+SPR_KICK5 EQU 29
+ATLAS2_BYTES EQU 45120
+ATLAS2_PARAS EQU 2820
 spr_tab label word
     ; atlas x, atlas y, w, h, anchor x, screen y
-    dw 0,0,43,48,20,132   ; idle
+    dw 278,0,37,57,17,123   ; idle (full body, feet included)
     dw 44,0,78,40,57,138   ; run175
     dw 123,0,77,40,55,136   ; run177
     dw 201,0,73,36,48,135   ; run180
@@ -43,3 +54,17 @@ spr_tab label word
     dw 79,140,78,39,57,138   ; run199
     dw 158,140,77,38,55,138   ; run200
     dw 236,140,77,55,0,9   ; hud
+    dw 0,0,44,57,20,123   ; punchw (atlas 2)
+    dw 45,0,60,57,18,123   ; punch (atlas 2)
+    dw 0,108,43,33,3,148   ; kick 1 crouch (atlas 2)
+    dw 0,58,46,49,17,133   ; kick 2 chamber (atlas 2)
+    dw 47,58,79,49,18,132   ; kick 3 leg out (atlas 2)
+    dw 187,0,42,56,20,94   ; death 0 (video frame 222)
+    dw 106,0,80,57,62,62   ; death 1 (video frame 225)
+    dw 230,0,79,56,61,74   ; death 2 (video frame 227)
+    dw 230,0,79,56,61,92   ; death 3 (video frame 228)
+    dw 230,0,79,56,61,111   ; death 4 (video frame 229)
+    dw 127,58,76,47,61,139   ; death 5 (video frame 230)
+    dw 44,108,87,20,59,165   ; death 6 (video frame 240)
+    dw 204,58,68,44,20,139   ; kick 4 retract (atlas 2)
+    dw 273,58,42,35,10,146   ; kick 5 land (atlas 2)

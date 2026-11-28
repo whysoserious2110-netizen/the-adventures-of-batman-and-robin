@@ -2,6 +2,9 @@
 ;  BATMAN.ASM  -  THE ADVENTURES OF BATMAN & ROBIN
 ;  PHASE 0 : Title screen + OPTION MODE + Batcave cutscene
 ;  STEP 2  : scrolling street + Batman run (A/S or arrows, ESC)
+;  STEP 3  : 1v1 DUEL vs THE JOKER, best of 3 rounds (walk right to start it)
+;            the Joker FIRES A GUN (muzzle flash + bullet); when Batman is shot
+;            down he flies back, tumbles and lies on the ground (death animation)
 ;  TASM 5.1  |  VGA mode 13h (320x200, 256 colors)
 ;
 ;  Needs in the same folder:  ALFRED.INC  (assembled in)
@@ -82,6 +85,17 @@ LAMP MACRO px,py,pc
     RECTF px+2,py+2,2,2,1
 ENDM
 
+; clipped rectangle relative to jsx (used for the knocked-out Batman)
+KRECT MACRO px,py,pw,ph,pc
+    mov ax,[jsx]
+    add ax,px
+    mov bx,py
+    mov cx,pw
+    mov dx,ph
+    mov si,pc
+    call ClipRect
+ENDM
+
 ; ============================================================
 .DATA
 ; ============================================================
@@ -158,10 +172,12 @@ palB label byte             ; colors 32..47
     INCLUDE BRUCE.INC       ; palE (colors 64..79 in the cutscene) + bruce_img
     INCLUDE HARLEY.INC      ; palF (colors 80..95 in the cutscene) + harley_img
     INCLUDE JOKER.INC       ; palG (colors 96..111) + joker_img
-    INCLUDE JOKERTV.INC     ; palH (colors 112..127) + jokertv_img
+palH        db 48 dup(0)        ; JOKERTV.BIN: palette (colors 112..127)
+jokertv_img db 10912 dup(0)     ; JOKERTV.BIN: bitmap 124x88 (must stay right after palH)
     INCLUDE BATPORT.INC     ; palI (colors 128..143) + batman_img
     INCLUDE EQUIP.INC       ; palJ (colors 144..159) + equip_img
     INCLUDE STAGE.INC       ; sprite table + constants (colors 64..255 from STAGE.BIN)
+    INCLUDE JOKSPR.INC      ; Joker duel sprite (palette slots 48..58)
 palbuf    db 256*3 dup(0)   ; working palette (colors 0..255)
 
 ; ---------------- strings ---------------------------------
@@ -177,12 +193,104 @@ fname3  db "AMUSED.BIN",0
 msgfile db "TITLE.BIN, OPTION.BIN or AMUSED.BIN not found.$"
 fname5   db "STAGE.BIN",0
 msgstage db "STAGE.BIN not found or not enough memory.$"
+fname6   db "JOKERTV.BIN",0
+msgjtv   db "JOKERTV.BIN not found.$"
 gamepal  db 576 dup(0)          ; palette of STAGE.BIN (colors 64..255)
 stseg    dw 5 dup(0)            ; 5 street screens (64000 bytes each)
 atlseg   dw 0                   ; sprite atlas segment
+atlseg2  dw 0                   ; second atlas (punch, jump kick)
+a2flag   db 0
+ofs_y    dw 0                   ; extra lift for Batman (jump)
+jofs     dw 0
+act      db 0                   ; 0 none, 1 punch, 2 jump kick, 3 batarang, 4 bomb
+act_t    dw 0
+k_j      db 0
+k_k      db 0                   ; W = jump kick
+thr_cd   dw 0                   ; frames to wait before the next batarang in the air
+k_d      db 0                   ; L = batarang (ITEM)
+MAXBAR   EQU 8                  ; how many batarangs can be in the air at once
+bar_on   dw MAXBAR dup(0)       ; batarang slot in the air? (one word per slot)
+bar_dir  dw MAXBAR dup(0)
+bar_x    dw MAXBAR dup(0)       ; world x of its left edge
+bar_y    dw MAXBAR dup(0)       ; screen y of its top edge
+bar_t    dw MAXBAR dup(0)
+k_i      db 0                   ; I = bomb
+bomb_cd  dw 0                   ; frames to wait before the next bomb
+MAXBOMB  EQU 3                  ; bombs on screen at once
+bomb_st  dw MAXBOMB dup(0)      ; 0 free, 1 flying, 2 fuse burning, 3 exploding
+bomb_x   dw MAXBOMB dup(0)      ; world x of its left edge
+bomb_y   dw MAXBOMB dup(0)      ; screen y of its top edge
+bomb_vx  dw MAXBOMB dup(0)      ; sideways speed (negative = left)
+bomb_vy  dw MAXBOMB dup(0)      ; up/down speed (negative = up)
+bomb_t   dw MAXBOMB dup(0)      ; frame counter of the current state
+blt_cx   dw 0                   ; explosion drawing variables
+blt_cy   dw 0
+blt_r    dw 0
+blt_col  dw 0
+bomb_img  db 0,0,0,0,14,0,0     ; 7x7 bomb, red spark
+          db 0,0,0,2,2,0,0
+          db 0,0,12,12,12,0,0
+          db 0,12,3,12,12,12,0
+          db 0,12,3,12,12,12,0
+          db 0,12,12,12,12,12,0
+          db 0,0,12,12,12,0,0
+bomb_img2 db 0,0,0,0,1,0,0      ; same bomb, white spark (blink)
+          db 0,0,0,2,2,0,0
+          db 0,0,12,12,12,0,0
+          db 0,12,3,12,12,12,0
+          db 0,12,3,12,12,12,0
+          db 0,12,12,12,12,12,0
+          db 0,0,12,12,12,0,0
+bar_img  db 3,0,0,3,0,3,0,0,3
+         db 3,3,12,3,1,3,12,3,3
+         db 0,3,12,12,12,12,12,3,0
+         db 0,0,3,12,12,12,3,0,0
+         db 0,0,0,3,0,3,0,0,0
+bar_img2 db 0,0,0,3,0,3,0,0,0
+         db 0,0,3,12,12,12,3,0,0
+         db 0,3,12,12,12,12,12,3,0
+         db 3,3,12,3,1,3,12,3,3
+         db 3,0,0,3,0,3,0,0,3
 cam_x    dw 0                   ; camera (world x of the left screen edge)
 wx       dw 0                   ; Batman world x
 hp       dw 0                   ; health bar height
+; ---- duel vs the Joker ----
+fight_on db 0                   ; 1 = the duel has started
+fphase   db 0                   ; 0 intro, 1 fighting, 2 round over, 3 match over
+f_timer  dw 0                   ; frames left in the current phase
+f_round  db 1                   ; round 1..3
+bwins    db 0                   ; rounds won by Batman
+ewins    db 0                   ; rounds won by the Joker
+f_result db 0                   ; 1 = Batman won the match, 2 = Joker won
+fcam     dw 0                   ; camera is locked here during the duel
+frozen   db 0                   ; 1 = Batman cannot be controlled this frame
+fexit    db 0                   ; 1 = leave the game
+e_x      dw 0                   ; Joker world x (centre)
+e_hp     dw 0                   ; Joker health (same size as the tube)
+e_dir    db 1                   ; 0 = Joker faces right, 1 = faces left
+e_st     db 0                   ; 0 walk/idle, 1 wind-up, 2 strike, 3 hurt, 4 KO
+e_tm     dw 0                   ; frames in the current state
+e_wait     dw 0                   ; frames before he may attack again
+e_walk   dw 0                   ; walk animation counter
+binv     dw 0                   ; Batman blink / invulnerable frames after a hit
+kick_hit db 0                   ; this kick already hit
+jsx      dw 0                   ; screen x of the figure being drawn
+js_y     dw 0                   ; Joker sprite drawing variables
+js_sx    dw 0
+js_w     dw 0
+js_h     dw 0
+js_flip  db 0
+js_flash db 0                   ; 0 = normal colors, else every pixel in this color
+js_off   dw 0
+bul_on   db 0                   ; 1 = the Joker's bullet is flying
+bul_dir  db 0                   ; 0 = flies right, 1 = flies left
+bul_x    dw 0                   ; bullet world x (its head)
+bk_t     dw 0                   ; frames since Batman was shot down
+sFight   db "FIGHT!",0
+sKO      db "K.O.",0
+sRoundN  db "ROUND 1",0
+sYouWin  db "YOU WIN",0
+sGameOv  db "GAME OVER",0
 anim_f   db 0
 anim_t   db 0
 moving   db 0
@@ -371,6 +479,8 @@ start:
     mov [font_seg],es
     mov [font_off],bp
 
+    call LoadJokerTv            ; JOKERTV.BIN -> palH + jokertv_img
+
     mov ax,13h                  ; VGA mode 13h
     int 10h
 
@@ -492,7 +602,7 @@ no_mem:
 
 ; ============================================================
 ;  STARTGAME - Phase 1: scrolling street, Batman runs
-;  A / S or LEFT / RIGHT = move, ESC = leave the stage
+;  A / S or LEFT / RIGHT = move, J = punch, W = jump kick, L = batarang (also in the air), I = bomb, ESC = leave
 ;  Needs STAGE.BIN + STAGE.INC (street 1600x200 + sprite atlas)
 ; ============================================================
 SPEED     EQU 8                 ; pixels per frame (bigger = faster)
@@ -503,6 +613,48 @@ CAM_MAX   EQU WORLD_W-320
 MIN_SX    EQU 30                ; Batman cannot walk left of this screen x
 MAX_WX    EQU WORLD_W-30
 ANIM_RATE EQU 1                 ; frames per animation step (bigger = slower)
+PUNCH_LEN EQU 14                ; frames the punch lasts
+JK_LEN    EQU 12                ; frames the jump kick lasts
+JK_H4     EQU 80                ; 4 x jump height (20 pixels)
+JK_SPEED  EQU 8                 ; pixels per frame while jump kicking (8 x 12 frames = about 96 pixels in total)
+THROW_LEN EQU 6                ; frames of the throwing pose
+BOMB_VX    EQU 5                ; bomb sideways pixels per frame
+BOMB_GROUND EQU 172             ; screen y where the bomb lands (top edge)
+BOMB_CD    EQU 6                ; frames between bombs while holding I
+FUSE_LEN   EQU 12               ; frames the fuse burns after landing
+BLAST_LEN  EQU 8                ; frames the explosion lasts
+AIR_CD    EQU 3                 ; frames between batarangs while holding L in the air
+BAR_SPEED EQU 8                 ; batarang pixels per frame
+BAR_LIFE  EQU 40                ; batarang flies this many frames at most
+
+; ---- duel settings ----
+FIGHT_WX    EQU 700             ; the duel starts when Batman walks past this world x
+ARENA_L     EQU 30              ; arena limits, screen x
+ARENA_R     EQU 290
+PUNCH_DMG   EQU 4               ; damage to the Joker (his health = TUBE_H = 37)
+KICK_DMG    EQU 7
+BAR_DMG     EQU 3
+BOMB_DMG    EQU 8
+PUNCH_REACH EQU 62
+KICK_REACH  EQU 72
+BOMB_REACH  EQU 46
+E_SPEED     EQU 3               ; Joker walking speed
+E_RANGE     EQU 140             ; he stops and shoots from this distance
+E_WIND      EQU 14              ; wind-up frames (the warning)
+E_STRIKE    EQU 8               ; strike frames
+E_HURT      EQU 12              ; stagger frames
+E_CD        EQU 36              ; base pause between attacks (+ random 0..31)
+E_REACH     EQU 66              ; distance his punch can hit
+E_DMG       EQU 4               ; damage to Batman (NORMAL)
+E_DMG_HARD  EQU 6               ; damage to Batman (HARD)
+BINV_LEN    EQU 30              ; Batman can not be hit again for this many frames
+BUL_SPEED   EQU 9               ; bullet pixels per frame
+BUL_HIT     EQU 14              ; bullet hits Batman when this close (x)
+BUL_OFS     EQU 22              ; muzzle distance from the Joker's centre
+BUL_Y       EQU 139             ; bullet screen y (gun height: 180-JOK_H+GUN_ROW-1)
+FLASH_LEN   EQU 6               ; frames the muzzle flash is shown
+DK_HOLD     EQU 5               ; frames each death pose is shown
+DK_EDGE     EQU 70              ; keeps the flying Batman on screen
 
 StartGame proc near
     ; free the option background buffer to make room
@@ -513,6 +665,7 @@ StartGame proc near
     call LoadStage
     jc sg_nofile
     call UseGamePal
+    call UseJokerSprPal         ; palette slots 48.. for the Joker sprite
     mov word ptr [drawseg],0A000h
     mov word ptr [cam_x],0
     mov word ptr [wx],START_WX
@@ -526,6 +679,39 @@ StartGame proc near
     mov byte ptr [k_a],0
     mov byte ptr [k_s],0
     mov byte ptr [k_esc],0
+    mov byte ptr [k_j],0
+    mov byte ptr [k_k],0
+    mov word ptr [thr_cd],0
+    mov byte ptr [k_d],0
+    push si
+    xor si,si
+sg_clr:
+    mov word ptr [bar_on+si],0
+    add si,2
+    cmp si,MAXBAR*2
+    jb sg_clr
+    pop si
+    push si
+    xor si,si
+sg_clb:
+    mov word ptr [bomb_st+si],0
+    add si,2
+    cmp si,MAXBOMB*2
+    jb sg_clb
+    pop si
+    mov byte ptr [k_i],0
+    mov byte ptr [fight_on],0
+    mov byte ptr [bul_on],0
+    mov word ptr [bk_t],0
+    mov byte ptr [fphase],0
+    mov byte ptr [fexit],0
+    mov byte ptr [frozen],0
+    mov word ptr [binv],0
+    mov word ptr [bomb_cd],0
+    mov byte ptr [act],0
+    mov word ptr [act_t],0
+    mov word ptr [jofs],0
+    mov word ptr [ofs_y],0
     call InstallKbd
     call RenderGame
     mov ax,[bufseg]
@@ -534,6 +720,39 @@ StartGame proc near
 sg_loop:
     cmp byte ptr [k_esc],0
     jne sg_exit
+    call FightTick              ; starts / runs the duel against the Joker
+    cmp byte ptr [fexit],0
+    jne sg_exit
+    cmp byte ptr [frozen],0
+    jne sg_frz
+    cmp byte ptr [act],0
+    jne sg_act
+    cmp byte ptr [k_j],0
+    je sg_nj
+    mov byte ptr [act],1
+    mov word ptr [act_t],0
+    jmp sg_act
+sg_nj:
+    cmp byte ptr [k_k],0
+    je sg_nk
+    mov byte ptr [act],2
+    mov word ptr [act_t],0
+    jmp sg_act
+sg_nk:
+    cmp byte ptr [k_d],0
+    je sg_ni
+    mov byte ptr [act],3
+    mov word ptr [act_t],0
+    jmp sg_act
+sg_ni:
+    cmp byte ptr [k_i],0        ; I = throw a bomb with the hand
+    je sg_noact
+    mov byte ptr [act],4
+    mov word ptr [act_t],0
+sg_act:
+    call DoAction
+    jmp sg_cam
+sg_noact:
     mov byte ptr [moving],0
     ; ---- right ----
     mov al,[k_right]
@@ -548,6 +767,9 @@ sg_loop:
     mov ax,MAX_WX
 sg_rok:
     mov [wx],ax
+    jmp sg_cam
+sg_frz:                         ; intro / KO banner: Batman stands still
+    mov byte ptr [moving],0
     jmp sg_cam
     ; ---- left ----
 sg_chkl:
@@ -566,6 +788,11 @@ sg_lok:
     mov [wx],ax
     ; ---- camera follows Batman both ways ----
 sg_cam:
+    cmp byte ptr [fight_on],0
+    je sg_cnorm
+    call ArenaClamp             ; duel: camera locked, Batman stays in the arena
+    jmp sg_cset
+sg_cnorm:
     mov ax,[wx]
     sub ax,CAM_LEAD
     jge sg_c1
@@ -593,6 +820,8 @@ sg_anim:
     jb sg_draw
     mov byte ptr [anim_f],0
 sg_draw:
+    call UpdateBarang
+    call UpdateBombs
     call RenderGame
     call WaitVsync
     mov ax,[bufseg]
@@ -636,6 +865,11 @@ ls_al:
     int 21h
     jc ls_fail
     mov [atlseg],ax
+    mov bx,ATLAS2_PARAS
+    mov ah,48h
+    int 21h
+    jc ls_fail
+    mov [atlseg2],ax
     mov dx,offset fname5
     mov ax,3D00h
     int 21h
@@ -663,6 +897,14 @@ ls_rd:
     mov ds,ax
     xor dx,dx
     mov cx,62400
+    mov ah,3Fh
+    int 21h
+    pop ds
+    push ds
+    mov ax,[atlseg2]
+    mov ds,ax
+    xor dx,dx
+    mov cx,ATLAS2_BYTES
     mov ah,3Fh
     int 21h
     pop ds
@@ -776,6 +1018,22 @@ kb_4:
     jne kb_5
     mov [k_esc],ah
 kb_5:
+    cmp bl,24h                  ; J = punch
+    jne kb_6
+    mov [k_j],ah
+kb_6:
+    cmp bl,11h                  ; W = jump kick
+    jne kb_7
+    mov [k_k],ah
+kb_7:
+    cmp bl,26h                  ; L = batarang
+    jne kb_8
+    mov [k_d],ah
+kb_8:
+    cmp bl,17h                  ; I = bomb
+    jne kb_9
+    mov [k_i],ah
+kb_9:
     mov al,20h                  ; end of interrupt
     out 20h,al
     pop ds
@@ -783,6 +1041,531 @@ kb_5:
     pop ax
     iret
 KbdISR endp
+
+; ---- batarang: let go, fly, draw ----
+SpawnBarang proc near
+    push ax
+    push si
+    xor si,si
+spb_find:
+    cmp word ptr [bar_on+si],0  ; look for a free slot
+    je spb_got
+    add si,2
+    cmp si,MAXBAR*2
+    jb spb_find
+    jmp spb_x                   ; all slots busy
+spb_got:
+    mov ax,[wx]
+    cmp byte ptr [bat_dir],0
+    jne spb_l
+    add ax,30
+    jmp spb_s
+spb_l:
+    sub ax,38
+spb_s:
+    mov [bar_x+si],ax
+    mov ax,136                  ; hand height, minus the jump lift
+    sub ax,[jofs]
+    mov [bar_y+si],ax
+    mov al,[bat_dir]
+    xor ah,ah
+    mov [bar_dir+si],ax
+    mov word ptr [bar_t+si],0
+    mov word ptr [bar_on+si],1
+spb_x:
+    pop si
+    pop ax
+    ret
+SpawnBarang endp
+
+UpdateBarang proc near
+    push ax
+    push si
+    xor si,si
+ub_next:
+    cmp word ptr [bar_on+si],0
+    je ub_skip
+    mov ax,[bar_x+si]
+    cmp word ptr [bar_dir+si],0
+    jne ub_l
+    add ax,BAR_SPEED
+    jmp ub_s
+ub_l:
+    sub ax,BAR_SPEED
+ub_s:
+    mov [bar_x+si],ax
+    inc word ptr [bar_t+si]
+    cmp word ptr [bar_t+si],BAR_LIFE
+    jae ub_off
+    sub ax,[cam_x]
+    cmp ax,320                  ; unsigned compare: also catches negative
+    jb ub_skip
+ub_off:
+    mov word ptr [bar_on+si],0
+ub_skip:
+    add si,2
+    cmp si,MAXBAR*2
+    jb ub_next
+    pop si
+    pop ax
+    ret
+UpdateBarang endp
+
+DrawBarang proc near
+    push si
+    xor si,si
+dbl_next:
+    cmp word ptr [bar_on+si],0
+    je dbl_skip
+    call DrawOneBarang
+dbl_skip:
+    add si,2
+    cmp si,MAXBAR*2
+    jb dbl_next
+    pop si
+    ret
+DrawBarang endp
+
+DrawOneBarang proc near         ; SI = slot number x 2
+    pusha
+    push es
+    mov ax,[bufseg]
+    mov es,ax
+    mov bx,[bar_x+si]
+    sub bx,[cam_x]              ; bx = screen x of the left edge
+    mov dx,[bar_y+si]
+    mov di,dx
+    shl di,6
+    shl dx,8
+    add di,dx                   ; di = y*320
+    mov cx,[bar_t+si]
+    mov si,offset bar_img
+    test cx,2                   ; spin: swap the two pictures
+    jz db_a
+    mov si,offset bar_img2
+db_a:
+    mov dx,5                    ; rows
+db_row:
+    push bx
+    push di
+    mov cx,9
+db_col:
+    lodsb
+    or al,al
+    jz db_skip
+    cmp bx,320
+    jae db_skip
+    mov es:[di+bx],al
+db_skip:
+    inc bx
+    loop db_col
+    pop di
+    pop bx
+    add di,320
+    dec dx
+    jnz db_row
+    pop es
+    popa
+    ret
+DrawOneBarang endp
+
+; ---- bomb: throw it in an arc, fuse, explode ----
+SpawnBomb proc near
+    push ax
+    push si
+    xor si,si
+sbm_find:
+    cmp word ptr [bomb_st+si],0 ; look for a free slot
+    je sbm_got
+    add si,2
+    cmp si,MAXBOMB*2
+    jb sbm_find
+    jmp sbm_x                   ; all slots busy
+sbm_got:
+    mov ax,[wx]
+    cmp byte ptr [bat_dir],0
+    jne sbm_l
+    add ax,30
+    mov word ptr [bomb_vx+si],BOMB_VX
+    jmp sbm_s
+sbm_l:
+    sub ax,38
+    mov word ptr [bomb_vx+si],-BOMB_VX
+sbm_s:
+    mov [bomb_x+si],ax
+    mov ax,130                  ; hand height, minus the jump lift
+    sub ax,[jofs]
+    mov [bomb_y+si],ax
+    mov word ptr [bomb_vy+si],-5
+    mov word ptr [bomb_t+si],0
+    mov word ptr [bomb_st+si],1
+sbm_x:
+    pop si
+    pop ax
+    ret
+SpawnBomb endp
+
+UpdateBombs proc near
+    push ax
+    push si
+    xor si,si
+ubm_next:
+    mov ax,[bomb_st+si]
+    or ax,ax
+    jz ubm_skip
+    cmp ax,1
+    je ubm_fly
+    cmp ax,2
+    je ubm_fuse
+    inc word ptr [bomb_t+si]    ; state 3: explosion
+    cmp word ptr [bomb_t+si],BLAST_LEN
+    jb ubm_skip
+    mov word ptr [bomb_st+si],0
+    jmp ubm_skip
+ubm_fuse:
+    inc word ptr [bomb_t+si]
+    cmp word ptr [bomb_t+si],FUSE_LEN
+    jb ubm_skip
+    mov word ptr [bomb_st+si],3
+    mov word ptr [bomb_t+si],0
+    jmp ubm_skip
+ubm_fly:
+    mov ax,[bomb_x+si]
+    add ax,[bomb_vx+si]
+    mov [bomb_x+si],ax
+    inc word ptr [bomb_vy+si]   ; gravity
+    mov ax,[bomb_y+si]
+    add ax,[bomb_vy+si]
+    cmp ax,BOMB_GROUND
+    jl ubm_air
+    mov ax,BOMB_GROUND          ; landed
+    mov word ptr [bomb_st+si],2
+    mov word ptr [bomb_t+si],0
+ubm_air:
+    mov [bomb_y+si],ax
+ubm_skip:
+    add si,2
+    cmp si,MAXBOMB*2
+    jb ubm_next
+    pop si
+    pop ax
+    ret
+UpdateBombs endp
+
+DrawBombs proc near
+    pusha
+    xor si,si
+dbb_next:
+    cmp word ptr [bomb_st+si],0
+    je dbb_skip
+    call DrawOneBomb
+dbb_skip:
+    add si,2
+    cmp si,MAXBOMB*2
+    jb dbb_next
+    popa
+    ret
+DrawBombs endp
+
+DrawOneBomb proc near           ; SI = slot number x 2
+    pusha
+    push es
+    mov bx,[bomb_x+si]
+    sub bx,[cam_x]              ; bx = screen x of the left edge
+    mov dx,[bomb_y+si]
+    cmp word ptr [bomb_st+si],3
+    je dob_blast
+    mov ax,[bufseg]
+    mov es,ax
+    mov di,dx
+    shl di,6
+    shl dx,8
+    add di,dx                   ; di = y*320
+    mov ax,[bomb_st+si]
+    mov cx,[bomb_t+si]
+    mov si,offset bomb_img
+    cmp ax,2                    ; the spark blinks while the fuse burns
+    jne dob_a
+    test cx,2
+    jz dob_a
+    mov si,offset bomb_img2
+dob_a:
+    mov dx,7                    ; rows
+dob_row:
+    push bx
+    push di
+    mov cx,7
+dob_col:
+    lodsb
+    or al,al
+    jz dob_skip
+    cmp bx,320
+    jae dob_skip
+    mov es:[di+bx],al
+dob_skip:
+    inc bx
+    loop dob_col
+    pop di
+    pop bx
+    add di,320
+    dec dx
+    jnz dob_row
+    jmp dob_x
+dob_blast:                      ; explosion: 4 layers, growing every frame
+    add bx,3                    ; bx = centre x
+    sub dx,8                    ; dx = centre y
+    mov ax,[bomb_t+si]
+    shl ax,2
+    add ax,6
+    mov bp,ax                   ; bp = radius
+    mov ax,bp                   ; red outside
+    mov di,14
+    call BlastShape
+    mov ax,bp                   ; orange = 3/4
+    mov cx,ax
+    shr cx,2
+    sub ax,cx
+    mov di,10
+    call BlastShape
+    mov ax,bp                   ; gold = 1/2
+    shr ax,1
+    mov di,2
+    call BlastShape
+    mov ax,bp                   ; white core = 1/4
+    shr ax,2
+    mov di,1
+    call BlastShape
+dob_x:
+    pop es
+    popa
+    ret
+DrawOneBomb endp
+
+; ---- one explosion layer: BX = centre x, DX = centre y, AX = radius, DI = color ----
+BlastShape proc near
+    pusha
+    mov [blt_cx],bx
+    mov [blt_cy],dx
+    mov [blt_r],ax
+    mov [blt_col],di
+    mov ax,[blt_cx]             ; wide box
+    sub ax,[blt_r]
+    mov bx,[blt_r]
+    shr bx,1
+    neg bx
+    add bx,[blt_cy]
+    mov cx,[blt_r]
+    shl cx,1
+    mov dx,[blt_r]
+    mov si,[blt_col]
+    call ClipRect
+    mov ax,[blt_r]              ; tall box
+    shr ax,1
+    neg ax
+    add ax,[blt_cx]
+    mov bx,[blt_cy]
+    sub bx,[blt_r]
+    mov cx,[blt_r]
+    mov dx,[blt_r]
+    shl dx,1
+    mov si,[blt_col]
+    call ClipRect
+    mov ax,[blt_r]              ; middle box (rounds the corners)
+    mov dx,ax
+    shr ax,1
+    shr dx,2
+    add ax,dx                   ; ax = 3/4 of the radius
+    mov dx,ax
+    mov cx,ax
+    shl cx,1
+    mov bx,[blt_cy]
+    sub bx,dx
+    mov ax,[blt_cx]
+    sub ax,dx
+    shl dx,1
+    mov si,[blt_col]
+    call ClipRect
+    popa
+    ret
+BlastShape endp
+
+; ---- FillRect that stays inside the screen: AX = x, BX = y, CX = w, DX = h, SI = color ----
+ClipRect proc near
+    pusha
+    cmp ax,0
+    jge cr_a
+    add cx,ax                   ; cut off the part left of the screen
+    xor ax,ax
+cr_a:
+    cmp bx,0
+    jge cr_b
+    add dx,bx                   ; cut off the part above the screen
+    xor bx,bx
+cr_b:
+    cmp cx,0
+    jle cr_x
+    cmp dx,0
+    jle cr_x
+    mov di,320
+    sub di,ax
+    jle cr_x
+    cmp cx,di
+    jle cr_c
+    mov cx,di                   ; cut off the part right of the screen
+cr_c:
+    mov di,200
+    sub di,bx
+    jle cr_x
+    cmp dx,di
+    jle cr_d
+    mov dx,di                   ; cut off the part below the screen
+cr_d:
+    call FillRect
+cr_x:
+    popa
+    ret
+ClipRect endp
+
+; ---- punch / jump kick state ----
+DoAction proc near
+    push ax
+    push bx
+    push dx
+    mov byte ptr [moving],0
+    cmp byte ptr [act],4
+    je bt_go
+    cmp byte ptr [act],3
+    je dt_go
+    cmp byte ptr [act],2
+    je dj_go
+    inc word ptr [act_t]        ; punch: stand still, count frames
+    cmp word ptr [act_t],PUNCH_LEN
+    jb da_ret
+    mov byte ptr [act],0
+    mov word ptr [act_t],0
+    jmp da_ret
+bt_go:
+    cmp word ptr [act_t],0      ; bomb throw: let go of the bomb right away
+    jne bt_n
+    call SpawnBomb
+bt_n:
+    inc word ptr [act_t]
+    cmp word ptr [act_t],THROW_LEN
+    jb da_ret
+    mov byte ptr [act],0
+    mov word ptr [act_t],0
+    jmp da_ret
+dt_go:
+    cmp word ptr [act_t],0      ; throw: let go of the batarang right away
+    jne dt_n
+    call SpawnBarang
+dt_n:
+    inc word ptr [act_t]
+    cmp word ptr [act_t],THROW_LEN
+    jb da_ret
+    mov byte ptr [act],0
+    mov word ptr [act_t],0
+    jmp da_ret
+dj_go:
+    cmp word ptr [thr_cd],0     ; L in the air = throw a batarang
+    je dj_cdok
+    dec word ptr [thr_cd]
+    jmp dj_nothrow
+dj_cdok:
+    cmp byte ptr [k_d],0
+    je dj_nothrow
+    call SpawnBarang
+    mov word ptr [thr_cd],AIR_CD
+dj_nothrow:
+    cmp word ptr [bomb_cd],0    ; I in the air = throw a bomb
+    je dj_bok
+    dec word ptr [bomb_cd]
+    jmp dj_nobomb
+dj_bok:
+    cmp byte ptr [k_i],0
+    je dj_nobomb
+    call SpawnBomb
+    mov word ptr [bomb_cd],BOMB_CD
+dj_nobomb:
+    mov ax,[wx]                 ; jump kick: fly forward
+    cmp byte ptr [bat_dir],0
+    jne dj_left
+    add ax,JK_SPEED
+    cmp ax,MAX_WX
+    jbe dj_set
+    mov ax,MAX_WX
+    jmp dj_set
+dj_left:
+    sub ax,JK_SPEED
+    cmp ax,MIN_SX
+    jge dj_set
+    mov ax,MIN_SX
+dj_set:
+    mov [wx],ax
+    mov ax,[act_t]              ; height = 4*H*t*(L-t) / (L*L)
+    mov bx,JK_LEN
+    sub bx,ax
+    mul bx
+    mov bx,JK_H4
+    mul bx
+    mov bx,JK_LEN*JK_LEN
+    xor dx,dx
+    div bx
+    mov [jofs],ax
+    inc word ptr [act_t]
+    cmp word ptr [act_t],JK_LEN
+    jb da_ret
+    mov byte ptr [act],0
+    mov word ptr [act_t],0
+    mov word ptr [jofs],0
+da_ret:
+    pop dx
+    pop bx
+    pop ax
+    ret
+DoAction endp
+
+; ---- which sprite for the current punch / jump kick frame (BX) ----
+ActionSprite proc near
+    push ax
+    mov ax,[act_t]
+    cmp byte ptr [act],4
+    je as_th
+    cmp byte ptr [act],3
+    je as_th
+    cmp byte ptr [act],2
+    je as_jk
+    mov bx,SPR_PUNCHW
+    cmp ax,4
+    jb as_x
+    cmp ax,11
+    jae as_x
+    mov bx,SPR_PUNCH
+    jmp as_x
+as_th:
+    mov bx,SPR_PUNCH            ; throwing pose = arm out, shown at once
+    cmp ax,5
+    jb as_x
+    mov bx,SPR_PUNCHW
+    jmp as_x
+as_jk:
+    mov bx,SPR_JK1              ; crouch, wind-up (frames 0-1)
+    cmp ax,2
+    jb as_x
+    mov bx,SPR_JK2              ; chamber: knee up, leaning back (frames 2-3)
+    cmp ax,4
+    jb as_x
+    mov bx,SPR_JK3              ; the kick, leg fully out (frames 4-8)
+    cmp ax,9
+    jb as_x
+    mov bx,SPR_KICK4            ; leg pulled back (frames 9-10)
+    cmp ax,11
+    jb as_x
+    mov bx,SPR_KICK5            ; landing crouch (frame 11)
+as_x:
+    pop ax
+    ret
+ActionSprite endp
 
 ; ---- build one frame in the back buffer (bufseg) ----
 RenderGame proc near
@@ -793,13 +1576,35 @@ RenderGame proc near
     mov ax,[wx]
     sub ax,[cam_x]              ; Batman's screen x
     xor bx,bx                   ; idle
+    cmp byte ptr [act],0
+    jne rg_act
     cmp byte ptr [moving],0
     je rg_spr
     mov bl,[anim_f]
     inc bx                      ; run sprites start at index 1
+    jmp rg_spr
+rg_act:
+    call ActionSprite           ; bx = punch / jump kick pose
 rg_spr:
     mov dl,[bat_dir]
+    mov cx,[jofs]
+    mov [ofs_y],cx
+    cmp byte ptr [fight_on],0
+    je rg_draw
+    cmp word ptr [hp],0
+    jne rg_alive
+    call DrawBatKO              ; Batman lost the round
+    jmp rg_after
+rg_alive:
+    test byte ptr [binv],2      ; blink while he is protected after a hit
+    jnz rg_after
+rg_draw:
     call DrawAtlasSpr
+rg_after:
+    mov word ptr [ofs_y],0
+    call DrawBarang
+    call DrawBombs
+    call DrawFight              ; Joker, his health bar, round marks, banners
     call DrawHud
     mov word ptr [drawseg],0A000h
     popa
@@ -870,6 +1675,11 @@ DrawAtlasSpr proc near
     mov cx,12                   ; 6 words per sprite
     mul cx
     mov bx,ax                   ; bx = table offset
+    mov byte ptr [a2flag],0
+    cmp bx,16*12                ; sprites 16 and up live in atlas 2
+    jb da_f
+    mov byte ptr [a2flag],1
+da_f:
     pop dx
     pop ax
     mov cx,[spr_tab+bx+8]       ; anchor inside the sprite
@@ -888,6 +1698,7 @@ da_nf:
     dec ax
 da_s:                           ; ax = screen x of the first column drawn
     mov dx,[spr_tab+bx+10]      ; screen y
+    sub dx,[ofs_y]
     mov di,dx
     shl di,6
     shl dx,8
@@ -907,6 +1718,10 @@ da_s:                           ; ax = screen x of the first column drawn
     mov ax,[bufseg]
     mov es,ax
     mov ax,[atlseg]
+    cmp byte ptr [a2flag],0
+    je da_sg
+    mov ax,[atlseg2]
+da_sg:
     mov ds,ax
     pop ax
 da_row:
@@ -983,6 +1798,931 @@ scr_l:
     popa
     ret
 DrawScore endp
+
+; ============================================================
+;  DUEL vs THE JOKER  -  best of 3 rounds
+; ============================================================
+
+; ---- keep Batman inside the arena; returns AX = locked camera x ----
+ArenaClamp proc near
+    push bx
+    mov bx,[fcam]
+    mov ax,[wx]
+    add bx,ARENA_L
+    cmp ax,bx
+    jge ac_1
+    mov ax,bx
+ac_1:
+    mov bx,[fcam]
+    add bx,ARENA_R
+    cmp ax,bx
+    jle ac_2
+    mov ax,bx
+ac_2:
+    mov [wx],ax
+    mov ax,[fcam]
+    pop bx
+    ret
+ArenaClamp endp
+
+; ---- new round: full health, fighters back to their corners ----
+ResetRound proc near
+    push ax
+    push si
+    mov word ptr [hp],TUBE_H
+    mov word ptr [e_hp],TUBE_H
+    cmp byte ptr [f_round],1
+    je rr_nowx                  ; round 1: Batman stays where he is
+    mov ax,[fcam]
+    add ax,70
+    mov [wx],ax
+rr_nowx:
+    mov ax,[fcam]
+    add ax,250
+    mov [e_x],ax
+    mov byte ptr [bat_dir],0
+    mov byte ptr [e_dir],1
+    mov byte ptr [e_st],0
+    mov word ptr [e_tm],0
+    mov word ptr [e_wait],40
+    mov word ptr [e_walk],0
+    mov word ptr [binv],0
+    mov byte ptr [kick_hit],0
+    mov byte ptr [bul_on],0
+    mov word ptr [bk_t],0
+    mov byte ptr [act],0
+    mov word ptr [act_t],0
+    mov word ptr [jofs],0
+    mov byte ptr [moving],0
+    mov byte ptr [fphase],0
+    mov word ptr [f_timer],110
+    xor si,si
+rr_b:
+    mov word ptr [bar_on+si],0
+    add si,2
+    cmp si,MAXBAR*2
+    jb rr_b
+    xor si,si
+rr_m:
+    mov word ptr [bomb_st+si],0
+    add si,2
+    cmp si,MAXBOMB*2
+    jb rr_m
+    pop si
+    pop ax
+    ret
+ResetRound endp
+
+; ---- once per frame: start the duel, run the phases, fight logic ----
+FightTick proc near
+    pusha
+    mov byte ptr [frozen],0
+    cmp byte ptr [fight_on],0
+    jne ft_on
+    cmp word ptr [wx],FIGHT_WX
+    jb ft_ret
+    mov byte ptr [fight_on],1   ; Batman reached the Joker: duel starts
+    mov ax,[cam_x]
+    mov [fcam],ax
+    mov byte ptr [f_round],1
+    mov byte ptr [bwins],0
+    mov byte ptr [ewins],0
+    call ResetRound
+    jmp ft_frz
+ft_on:
+    mov al,[fphase]
+    cmp al,1
+    je ft_fight
+    cmp al,0
+    je ft_intro
+    cmp al,2
+    je ft_over
+    dec word ptr [f_timer]      ; phase 3: match over, show result, then leave
+    jnz ft_frz
+    mov byte ptr [fexit],1
+    jmp ft_frz
+ft_intro:
+    dec word ptr [f_timer]
+    jnz ft_frz
+    mov byte ptr [fphase],1     ; FIGHT!
+    jmp ft_ret
+ft_over:
+    dec word ptr [f_timer]
+    jnz ft_frz
+    cmp byte ptr [bwins],2
+    jae ft_pwin
+    cmp byte ptr [ewins],2
+    jae ft_plose
+    inc byte ptr [f_round]      ; next round
+    call ResetRound
+    jmp ft_frz
+ft_pwin:
+    mov byte ptr [f_result],1
+    add word ptr [score],1000
+    jmp ft_end
+ft_plose:
+    mov byte ptr [f_result],2
+ft_end:
+    mov byte ptr [fphase],3
+    mov word ptr [f_timer],210
+    jmp ft_frz
+ft_fight:
+    cmp word ptr [binv],0
+    je ft_nb
+    dec word ptr [binv]
+ft_nb:
+    cmp word ptr [e_wait],0
+    je ft_nc
+    dec word ptr [e_wait]
+ft_nc:
+    call BatAttacks             ; Batman's blows on the Joker
+    cmp word ptr [e_hp],0
+    jne ft_alive
+    inc byte ptr [bwins]        ; Joker is down: Batman wins the round
+    jmp ft_rend
+ft_alive:
+    call JokerAI
+    call UpdateBullet           ; the Joker's shot flies / hits
+    cmp word ptr [hp],0
+    jne ft_ret
+    inc byte ptr [ewins]        ; Batman is down: Joker wins the round
+    cmp byte ptr [e_st],4
+    je ft_rend
+    mov byte ptr [e_st],0
+ft_rend:
+    mov byte ptr [bul_on],0     ; no bullet survives the end of a round
+    mov byte ptr [fphase],2
+    mov word ptr [f_timer],100
+    mov byte ptr [act],0
+    mov word ptr [act_t],0
+    mov word ptr [jofs],0
+    mov byte ptr [moving],0
+ft_frz:
+    mov byte ptr [frozen],1
+    cmp word ptr [hp],0         ; Batman is down: run the death animation clock
+    jne ft_ret
+    cmp word ptr [bk_t],250
+    jae ft_ret
+    inc word ptr [bk_t]
+ft_ret:
+    popa
+    ret
+FightTick endp
+
+; ---- AX = damage to the Joker ----
+HitJoker proc near
+    push ax
+    push bx
+    push dx
+    cmp byte ptr [e_st],4
+    je hj_x
+    mov bx,[e_hp]
+    sub bx,ax
+    jg hj_ok
+    xor bx,bx
+hj_ok:
+    mov [e_hp],bx
+    mov dx,10
+    mul dx
+    add [score],ax              ; score = 10 per point of damage
+    mov byte ptr [e_st],3       ; staggers (cancels his attack)
+    mov word ptr [e_tm],0
+    or bx,bx
+    jnz hj_x
+    mov byte ptr [e_st],4       ; KO
+hj_x:
+    pop dx
+    pop bx
+    pop ax
+    ret
+HitJoker endp
+
+; ---- punch, jump kick, batarangs and bombs against the Joker ----
+BatAttacks proc near
+    push ax
+    push bx
+    push cx
+    cmp byte ptr [act],0
+    jne ba_act
+    mov byte ptr [kick_hit],0
+    jmp ba_proj
+ba_act:
+    mov ax,[wx]
+    sub ax,[e_x]
+    neg ax                      ; ax = Joker x - Batman x
+    cmp byte ptr [act],1
+    jne ba_nop
+    cmp word ptr [act_t],6      ; the punch lands on frame 6
+    jne ba_proj
+    mov cx,PUNCH_DMG
+    mov bx,PUNCH_REACH
+    jmp ba_reach
+ba_nop:
+    cmp byte ptr [act],2
+    jne ba_proj
+    cmp byte ptr [kick_hit],0
+    jne ba_proj
+    cmp word ptr [act_t],4      ; the kick is out from frame 4
+    jb ba_proj
+    mov cx,KICK_DMG
+    mov bx,KICK_REACH
+ba_reach:
+    cmp byte ptr [bat_dir],0
+    je ba_right
+    neg ax                      ; facing left: mirror
+ba_right:                       ; ax > 0 = Joker is in front of Batman
+    cmp ax,-12
+    jl ba_proj
+    cmp ax,bx
+    jg ba_proj
+    cmp byte ptr [act],2
+    jne ba_hit
+    mov byte ptr [kick_hit],1
+ba_hit:
+    mov ax,cx
+    call HitJoker
+ba_proj:
+    call BarangHits
+    call BombHits
+    pop cx
+    pop bx
+    pop ax
+    ret
+BatAttacks endp
+
+BarangHits proc near
+    push ax
+    push bx
+    push si
+    xor si,si
+bh_next:
+    cmp word ptr [bar_on+si],0
+    je bh_skip
+    mov ax,[bar_x+si]
+    add ax,9                    ; right edge of the batarang
+    mov bx,[e_x]
+    sub bx,14                   ; left edge of the Joker
+    cmp ax,bx
+    jle bh_skip
+    mov ax,[bar_x+si]
+    mov bx,[e_x]
+    add bx,14
+    cmp ax,bx
+    jge bh_skip
+    mov ax,[bar_y+si]
+    cmp ax,100
+    jl bh_skip
+    cmp ax,176
+    jg bh_skip
+    mov word ptr [bar_on+si],0  ; batarang is used up
+    mov ax,BAR_DMG
+    call HitJoker
+bh_skip:
+    add si,2
+    cmp si,MAXBAR*2
+    jb bh_next
+    pop si
+    pop bx
+    pop ax
+    ret
+BarangHits endp
+
+BombHits proc near
+    push ax
+    push si
+    xor si,si
+bo_next:
+    cmp word ptr [bomb_st+si],3 ; exploding ...
+    jne bo_skip
+    cmp word ptr [bomb_t+si],0  ; ... and this is its first frame
+    jne bo_skip
+    mov ax,[bomb_x+si]
+    add ax,3
+    sub ax,[e_x]
+    jns bo_p
+    neg ax
+bo_p:
+    cmp ax,BOMB_REACH
+    jg bo_skip
+    mov ax,BOMB_DMG
+    call HitJoker
+bo_skip:
+    add si,2
+    cmp si,MAXBOMB*2
+    jb bo_next
+    pop si
+    pop ax
+    ret
+BombHits endp
+
+; ---- the Joker's brain: walk up, wind up (warning), strike, rest ----
+JokerAI proc near
+    pusha
+    mov al,[e_st]
+    cmp al,1
+    je ja_wind
+    cmp al,2
+    je ja_strike
+    cmp al,3
+    je ja_hurt
+    mov ax,[wx]                 ; state 0: face Batman
+    sub ax,[e_x]
+    mov byte ptr [e_dir],0
+    or ax,ax
+    jns ja_f
+    mov byte ptr [e_dir],1
+    neg ax
+ja_f:                           ; ax = distance
+    cmp ax,E_RANGE
+    jle ja_near
+    inc word ptr [e_walk]       ; too far: walk towards Batman
+    mov ax,[e_x]
+    cmp byte ptr [e_dir],0
+    jne ja_wl
+    add ax,E_SPEED
+    jmp ja_ws
+ja_wl:
+    sub ax,E_SPEED
+ja_ws:
+    mov [e_x],ax
+    jmp ja_clamp
+ja_near:
+    cmp word ptr [e_wait],0
+    jne ja_clamp
+    mov byte ptr [e_st],1       ; start the wind-up
+    mov word ptr [e_tm],0
+    jmp ja_clamp
+ja_wind:
+    inc word ptr [e_tm]
+    cmp word ptr [e_tm],E_WIND
+    jb ja_clamp
+    mov byte ptr [e_st],2
+    mov word ptr [e_tm],0
+    call JokerStrike
+    jmp ja_clamp
+ja_strike:
+    inc word ptr [e_tm]
+    cmp word ptr [e_tm],E_STRIKE
+    jb ja_clamp
+    mov byte ptr [e_st],0
+    call Rand
+    and ax,31
+    add ax,E_CD
+    cmp byte ptr [opt_level],0
+    je ja_cd
+    sub ax,16                   ; HARD: he attacks more often
+ja_cd:
+    mov [e_wait],ax
+    jmp ja_clamp
+ja_hurt:
+    inc word ptr [e_tm]
+    cmp word ptr [e_tm],5
+    ja ja_nokb                  ; knocked back during the first frames
+    mov ax,[e_x]
+    cmp byte ptr [e_dir],0
+    jne ja_kr
+    sub ax,4
+    jmp ja_ks
+ja_kr:
+    add ax,4
+ja_ks:
+    mov [e_x],ax
+ja_nokb:
+    cmp word ptr [e_tm],E_HURT
+    jb ja_clamp
+    mov byte ptr [e_st],0
+    mov word ptr [e_wait],12
+ja_clamp:
+    mov ax,[e_x]
+    mov bx,[fcam]
+    add bx,ARENA_L
+    cmp ax,bx
+    jge ja_c1
+    mov ax,bx
+ja_c1:
+    mov bx,[fcam]
+    add bx,ARENA_R
+    cmp ax,bx
+    jle ja_c2
+    mov ax,bx
+ja_c2:
+    mov [e_x],ax
+    popa
+    ret
+JokerAI endp
+
+; ---- the Joker pulls the trigger: a bullet leaves the muzzle ----
+JokerStrike proc near
+    push ax
+    mov al,[e_dir]              ; 1 = he faces left, so the bullet flies left
+    mov [bul_dir],al
+    mov ax,[e_x]
+    cmp byte ptr [e_dir],0
+    jne jst_l
+    add ax,BUL_OFS
+    jmp jst_s
+jst_l:
+    sub ax,BUL_OFS
+jst_s:
+    mov [bul_x],ax
+    mov byte ptr [bul_on],1
+    pop ax
+    ret
+JokerStrike endp
+
+; ---- the bullet flies; when it reaches Batman it hurts him ----
+UpdateBullet proc near
+    push ax
+    push bx
+    cmp byte ptr [bul_on],0
+    je ubl_x
+    mov ax,[bul_x]
+    cmp byte ptr [bul_dir],0
+    jne ubl_l
+    add ax,BUL_SPEED
+    jmp ubl_s
+ubl_l:
+    sub ax,BUL_SPEED
+ubl_s:
+    mov [bul_x],ax
+    mov bx,[wx]
+    sub bx,ax
+    jns ubl_p
+    neg bx
+ubl_p:                          ; bx = distance between bullet and Batman
+    cmp bx,BUL_HIT
+    jg ubl_far
+    cmp word ptr [binv],0
+    jne ubl_far                 ; still protected: the bullet flies on
+    cmp word ptr [jofs],10
+    jge ubl_far                 ; Batman is in the air: the bullet goes under him
+    call BatShot
+    mov byte ptr [bul_on],0
+    jmp ubl_x
+ubl_far:
+    mov ax,[bul_x]
+    sub ax,[cam_x]
+    cmp ax,340                  ; unsigned: also catches negative = left of the screen
+    jb ubl_x
+    mov byte ptr [bul_on],0
+ubl_x:
+    pop bx
+    pop ax
+    ret
+UpdateBullet endp
+
+; ---- the bullet hits Batman: health goes down, or he is shot down ----
+BatShot proc near
+    push ax
+    push bx
+    mov bx,E_DMG
+    cmp byte ptr [opt_level],0
+    je bsh_d
+    mov bx,E_DMG_HARD
+bsh_d:
+    mov ax,[hp]
+    sub ax,bx
+    jg bsh_s
+    xor ax,ax
+bsh_s:
+    mov [hp],ax
+    mov word ptr [binv],BINV_LEN
+    mov byte ptr [act],0        ; Batman is interrupted
+    mov word ptr [act_t],0
+    mov word ptr [jofs],0
+    or ax,ax
+    jz bsh_x                    ; dead: the death animation takes over
+    mov ax,[wx]                 ; otherwise he is thrown back
+    cmp ax,[e_x]
+    jl bsh_l
+    add ax,16
+    jmp bsh_w
+bsh_l:
+    sub ax,16
+bsh_w:
+    mov [wx],ax
+bsh_x:
+    pop bx
+    pop ax
+    ret
+BatShot endp
+
+; ---- Joker sprite colors into palette slots 48.. ----
+UseJokerSprPal proc near
+    push ax
+    push cx
+    push si
+    push di
+    push es
+    push ds
+    pop es
+    cld
+    mov si,offset jok_pal
+    mov di,offset palbuf+144
+    mov cx,JOK_NCOL*3
+    rep movsb
+    pop es
+    pop di
+    pop si
+    pop cx
+    pop ax
+    ret
+UseJokerSprPal endp
+
+; ---- paint a sprite into the back buffer (transparent 0, clipped left/right)
+;      SI = sprite, js_sx = screen x of the first pixel of each row,
+;      js_y = top row, js_w/js_h = size, js_flip = 1 to run right to left,
+;      js_flash = color for a silhouette (0 = real colors)
+DrawJSpr proc near
+    pusha
+    push es
+    cld
+    mov ax,[bufseg]
+    mov es,ax
+    mov bx,[js_y]
+    mov di,bx
+    shl di,6
+    shl bx,8
+    add di,bx                   ; di = y*320
+    mov bp,1
+    cmp byte ptr [js_flip],0
+    je dsr_go
+    mov bp,-1
+dsr_go:
+    mov dx,[js_h]
+dsr_row:
+    push di
+    mov bx,[js_sx]
+    mov cx,[js_w]
+dsr_px:
+    lodsb
+    or al,al
+    jz dsr_skip
+    cmp bx,320
+    jae dsr_skip                ; off screen (also catches negative x)
+    cmp byte ptr [js_flash],0
+    je dsr_put
+    mov al,[js_flash]
+dsr_put:
+    mov es:[di+bx],al
+dsr_skip:
+    add bx,bp
+    loop dsr_px
+    pop di
+    add di,320
+    dec dx
+    jnz dsr_row
+    pop es
+    popa
+    ret
+DrawJSpr endp
+
+; ---- the Joker on screen ----
+DrawDuelJoker proc near
+    pusha
+    mov ax,[e_x]
+    sub ax,[cam_x]              ; ax = screen x of his centre
+    mov [jsx],ax
+    mov word ptr [js_off],0     ; sideways shift toward Batman (+) / away (-)
+    mov byte ptr [js_flash],0
+    mov word ptr [js_y],180-JOK_H   ; feet on the ground line
+    cmp byte ptr [e_st],4
+    je xj_ko
+    cmp byte ptr [e_st],1
+    je xj_w
+    cmp byte ptr [e_st],2
+    je xj_s
+    cmp byte ptr [e_st],3
+    je xj_h
+    test word ptr [e_walk],8    ; walking: small bob
+    jz xj_go
+    dec word ptr [js_y]
+    jmp xj_go
+xj_w:
+    mov word ptr [js_off],-4    ; wind-up: leans back, flashes red = warning
+    test word ptr [e_tm],4
+    jz xj_wm
+    mov byte ptr [js_flash],14
+xj_wm:
+    KRECT -2,106,4,9,2          ; gold "!" over his head
+    KRECT -2,117,4,3,2
+    jmp xj_go
+xj_s:
+    mov word ptr [js_off],-2    ; shot fired: small recoil
+    jmp xj_go
+xj_h:
+    mov word ptr [js_off],-5    ; hurt: thrown back, white flash
+    test word ptr [e_tm],2
+    jnz xj_go
+    mov byte ptr [js_flash],1
+xj_go:
+    mov word ptr [js_w],JOK_W
+    mov word ptr [js_h],JOK_H
+    mov si,offset jok_spr
+    mov dx,JOK_ANCH             ; anchor column inside the sprite
+    jmp xj_pos
+xj_ko:
+    mov word ptr [js_y],180-JOKO_H
+    mov word ptr [js_w],JOKO_W
+    mov word ptr [js_h],JOKO_H
+    mov si,offset joko_spr
+    mov dx,JOKO_W/2
+xj_pos:
+    ; the picture faces left. e_dir = 1 (faces left): as is. e_dir = 0: mirrored.
+    mov ax,[jsx]
+    cmp byte ptr [e_dir],0
+    jne xj_nf
+    add ax,[js_off]             ; toward Batman = +x
+    mov byte ptr [js_flip],1
+    mov cx,[js_w]
+    dec cx
+    sub cx,dx                   ; mirrored anchor = w-1-anchor
+    sub ax,cx                   ; left edge on screen
+    add ax,[js_w]
+    dec ax                      ; first pixel drawn = right edge
+    jmp xj_set
+xj_nf:
+    sub ax,[js_off]             ; facing left: toward Batman = -x
+    mov byte ptr [js_flip],0
+    sub ax,dx                   ; left edge on screen
+xj_set:
+    mov [js_sx],ax
+    call DrawJSpr
+    cmp byte ptr [e_st],2       ; firing: muzzle flash in front of the gun
+    jne xj_end
+    cmp word ptr [e_tm],FLASH_LEN
+    jae xj_end
+    mov ax,[js_sx]
+    cmp byte ptr [js_flip],0
+    jne xj_fm
+    sub ax,FLASH_W-2            ; faces left: flash sits left of the sprite
+    jmp xj_fp
+xj_fm:
+    add ax,FLASH_W-2            ; mirrored: flash sits right of the sprite
+xj_fp:
+    mov [js_sx],ax
+    add word ptr [js_y],GUN_ROW-2
+    mov word ptr [js_w],FLASH_W
+    mov word ptr [js_h],FLASH_H
+    mov si,offset flash_spr
+    call DrawJSpr
+xj_end:
+    popa
+    ret
+DrawDuelJoker endp
+
+; ---- Batman shot down: stagger, flies back, tumbles, crashes, lies still ----
+;      sprites SPR_DK0.. (STAGE.INC), one pose every DK_HOLD frames, the last stays
+DrawBatKO proc near
+    pusha
+    mov ax,[bk_t]
+    xor dx,dx
+    mov cx,DK_HOLD
+    div cx                      ; ax = pose number
+    cmp ax,DK_N-1
+    jbe dk_f
+    mov ax,DK_N-1               ; last pose: lying on the ground
+dk_f:
+    add ax,SPR_DK0
+    mov si,ax                   ; si = sprite number
+    mov ax,[wx]
+    sub ax,[cam_x]              ; ax = screen x where he was hit
+    xor dx,dx                   ; dl = 0: he falls to the left (Joker on his right)
+    mov bx,[e_x]
+    cmp bx,[wx]
+    jge dk_side
+    mov dl,1                    ; Joker on his left: he falls to the right (mirrored)
+dk_side:
+    or dl,dl
+    jnz dk_mir
+    cmp ax,DK_EDGE
+    jge dk_draw
+    mov ax,DK_EDGE
+    jmp dk_draw
+dk_mir:
+    cmp ax,320-DK_EDGE
+    jle dk_draw
+    mov ax,320-DK_EDGE
+dk_draw:
+    mov bx,si
+    call DrawAtlasSpr
+    popa
+    ret
+DrawBatKO endp
+
+; ---- the Joker's bullet: a short orange streak with a bright head ----
+DrawBullet proc near
+    pusha
+    cmp byte ptr [bul_on],0
+    je drb_x
+    mov ax,[bul_x]
+    sub ax,[cam_x]
+    mov bx,BUL_Y
+    mov cx,7
+    mov dx,2
+    mov si,60
+    cmp byte ptr [bul_dir],0
+    jne drb_l
+    push ax                     ; flies right: tail on the left, head on the right
+    sub ax,7
+    call ClipRect
+    pop ax
+    mov cx,3
+    mov si,62
+    call ClipRect
+    jmp drb_x
+drb_l:
+    push ax                     ; flies left: head on the left, tail on the right
+    call ClipRect
+    pop ax
+    sub ax,3
+    mov cx,3
+    mov si,62
+    call ClipRect
+drb_x:
+    popa
+    ret
+DrawBullet endp
+
+; ---- one round mark: AX = x, BX = y, SI = 1 if won ----
+DrawPip proc near
+    pusha
+    push si
+    mov cx,6
+    mov dx,6
+    mov si,3
+    call FillRect
+    pop si
+    inc ax
+    inc bx
+    mov cx,4
+    mov dx,4
+    or si,si
+    jz pp_e
+    mov si,2
+    jmp pp_f
+pp_e:
+    xor si,si
+pp_f:
+    call FillRect
+    popa
+    ret
+DrawPip endp
+
+; ---- Joker health bar + name, round marks for both ----
+DrawFightHud proc near
+    pusha
+    RECTF 202,17,115,10,3       ; frame
+    RECTF 204,19,111,6,0        ; empty
+    mov ax,[e_hp]
+    mov bx,3
+    mul bx
+    mov cx,ax                   ; width = 3 per health point
+    or cx,cx
+    jz xh_nf
+    mov ax,204
+    mov bx,19
+    mov dx,6
+    mov si,33
+    call FillRect
+xh_nf:
+    mov word ptr [txt_sc],1
+    mov word ptr [txt_col],1
+    mov word ptr [txt_x],202
+    mov word ptr [txt_y],29
+    mov si,offset lJoker
+    call DrawStr
+    xor si,si                   ; Joker round marks
+    cmp byte ptr [ewins],1
+    jb xh_a
+    mov si,1
+xh_a:
+    mov ax,300
+    mov bx,30
+    call DrawPip
+    xor si,si
+    cmp byte ptr [ewins],2
+    jb xh_b
+    mov si,1
+xh_b:
+    mov ax,289
+    mov bx,30
+    call DrawPip
+    xor si,si                   ; Batman round marks (under his badge)
+    cmp byte ptr [bwins],1
+    jb xh_c
+    mov si,1
+xh_c:
+    mov ax,10
+    mov bx,68
+    call DrawPip
+    xor si,si
+    cmp byte ptr [bwins],2
+    jb xh_d
+    mov si,1
+xh_d:
+    mov ax,21
+    mov bx,68
+    call DrawPip
+    popa
+    ret
+DrawFightHud endp
+
+; ---- big text with a shadow: SI = string, AX = x, BX = y, DX = color ----
+PutBig proc near
+    pusha
+    mov word ptr [txt_sc],3
+    push ax
+    push bx
+    push dx
+    push si
+    mov word ptr [txt_col],0
+    add ax,3
+    add bx,3
+    mov [txt_x],ax
+    mov [txt_y],bx
+    call DrawStr
+    pop si
+    pop dx
+    pop bx
+    pop ax
+    mov [txt_col],dx
+    mov [txt_x],ax
+    mov [txt_y],bx
+    call DrawStr
+    popa
+    ret
+PutBig endp
+
+; ---- ROUND n / FIGHT! / K.O. / YOU WIN / GAME OVER ----
+DrawBanner proc near
+    pusha
+    mov al,[fphase]
+    cmp al,0
+    je bn_intro
+    cmp al,2
+    je bn_ko
+    cmp al,3
+    je bn_end
+    jmp bn_x
+bn_intro:
+    cmp word ptr [f_timer],50
+    jbe bn_fight
+    mov al,[f_round]
+    add al,'0'
+    mov [sRoundN+6],al
+    mov si,offset sRoundN
+    mov ax,76
+    mov bx,70
+    mov dx,1
+    call PutBig
+    jmp bn_x
+bn_fight:
+    mov si,offset sFight
+    mov ax,88
+    mov bx,70
+    mov dx,2
+    call PutBig
+    jmp bn_x
+bn_ko:
+    mov si,offset sKO
+    mov ax,112
+    mov bx,70
+    mov dx,14
+    call PutBig
+    jmp bn_x
+bn_end:
+    cmp byte ptr [f_result],1
+    jne bn_lose
+    mov si,offset sYouWin
+    mov ax,76
+    mov bx,70
+    mov dx,2
+    call PutBig
+    jmp bn_x
+bn_lose:
+    mov si,offset sGameOv
+    mov ax,52
+    mov bx,70
+    mov dx,14
+    call PutBig
+bn_x:
+    popa
+    ret
+DrawBanner endp
+
+DrawFight proc near
+    pusha
+    cmp byte ptr [fight_on],0
+    je df_x
+    call DrawDuelJoker
+    call DrawBullet
+    call DrawFightHud
+    call DrawBanner
+df_x:
+    popa
+    ret
+DrawFight endp
 ; ============================================================
 ;  BASIC ROUTINES
 ; ============================================================
@@ -1326,6 +3066,32 @@ cg_sq_done:
     popa
     ret
 FillCircleGrad endp
+
+; ---- load JOKERTV.BIN: 48 palette bytes + 10912 bitmap bytes, in one read ----
+LoadJokerTv proc near
+    pusha
+    mov dx,offset fname6
+    mov ax,3D00h                ; open file
+    int 21h
+    jc ljt_fail
+    mov bx,ax                   ; file handle
+    mov dx,offset palH          ; palH and jokertv_img sit side by side
+    mov cx,10960                ; 48 + 124*88
+    mov ah,3Fh
+    int 21h
+    mov ah,3Eh                  ; close file
+    int 21h
+    popa
+    ret
+ljt_fail:
+    mov ax,3
+    int 10h
+    mov dx,offset msgjtv
+    mov ah,9
+    int 21h
+    mov ax,4C01h
+    int 21h
+LoadJokerTv endp
 
 ; ---- load a .BIN file: DX = file name, SI = 576-byte palette buffer,
 ;      AX = segment that receives the 64000 pixel bytes ----
